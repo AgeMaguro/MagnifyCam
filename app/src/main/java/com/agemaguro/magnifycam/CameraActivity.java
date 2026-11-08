@@ -84,7 +84,8 @@ public class CameraActivity extends ComponentActivity {
     private static class Lens {
         String id;
         float ratio = 1f;     // magnification compared with the main camera
-        float megapixels;     // largest photo the lens reports
+        float megapixels;     // largest photo the phone lets this app take with the lens
+        float sensorMp;       // pixels on the sensor itself (can be much more than the app is allowed to use)
         String label;
     }
 
@@ -395,6 +396,7 @@ public class CameraActivity extends ComponentActivity {
                 if (found.isEmpty()) baseEq = eq;   // the first one is the phone's default (main) camera
                 l.ratio = (eq > 0f && baseEq > 0f) ? eq / baseEq : 1f;
                 l.megapixels = maxMegapixels(c2);
+                l.sensorMp = sensorMegapixels(c2);
                 found.add(l);
             }
             // sort by magnification, drop near-duplicates
@@ -403,7 +405,10 @@ public class CameraActivity extends ComponentActivity {
                 if (!lenses.isEmpty()) {
                     Lens prev = lenses.get(lenses.size() - 1);
                     if (Math.abs(l.ratio - prev.ratio) / prev.ratio < 0.12f) {
-                        if (l.megapixels > prev.megapixels) lenses.set(lenses.size() - 1, l);
+                        if (l.megapixels > prev.megapixels
+                                || (l.megapixels == prev.megapixels && l.sensorMp > prev.sensorMp)) {
+                            lenses.set(lenses.size() - 1, l);
+                        }
                         continue;
                     }
                 }
@@ -438,11 +443,33 @@ public class CameraActivity extends ComponentActivity {
     private static float maxMegapixels(Camera2CameraInfo c2) {
         long best = 0;
         StreamConfigurationMap map = c2.getCameraCharacteristic(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-        if (map != null) best = Math.max(best, biggest(map.getOutputSizes(ImageFormat.JPEG)));
+        if (map != null) {
+            best = Math.max(best, biggest(map.getOutputSizes(ImageFormat.JPEG)));
+            best = Math.max(best, biggest(map.getHighResolutionOutputSizes(ImageFormat.JPEG)));
+        }
         if (Build.VERSION.SDK_INT >= 31) {
             StreamConfigurationMap mx = c2.getCameraCharacteristic(
                     CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
-            if (mx != null) best = Math.max(best, biggest(mx.getOutputSizes(ImageFormat.JPEG)));
+            if (mx != null) {
+                best = Math.max(best, biggest(mx.getOutputSizes(ImageFormat.JPEG)));
+                best = Math.max(best, biggest(mx.getHighResolutionOutputSizes(ImageFormat.JPEG)));
+            }
+        }
+        return best / 1e6f;
+    }
+
+    /** Pixels on the sensor itself, whether or not the phone lets apps use them all. */
+    private static float sensorMegapixels(Camera2CameraInfo c2) {
+        long best = 0;
+        try {
+            Size a = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE);
+            if (a != null) best = Math.max(best, (long) a.getWidth() * a.getHeight());
+            if (Build.VERSION.SDK_INT >= 31) {
+                Size m = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION);
+                if (m != null) best = Math.max(best, (long) m.getWidth() * m.getHeight());
+            }
+        } catch (Throwable ignored) {
+            // some phones refuse to say; then we just do not show the sensor size
         }
         return best / 1e6f;
     }
@@ -463,7 +490,13 @@ public class CameraActivity extends ComponentActivity {
         if (cur == null) {
             lensInfo.setText("");
         } else {
-            lensInfo.setText(String.format(Locale.US, "This lens can take photos up to %.0f MP", cur.megapixels));
+            if (cur.sensorMp >= cur.megapixels * 1.5f) {
+                // e.g. a 200 MP sensor that the phone only lets apps use as a binned ~12 MP picture
+                lensInfo.setText(String.format(Locale.US, "Sensor %.0f MP · this app can take up to %.0f MP",
+                        cur.sensorMp, cur.megapixels));
+            } else {
+                lensInfo.setText(String.format(Locale.US, "This lens can take photos up to %.0f MP", cur.megapixels));
+            }
         }
     }
 
